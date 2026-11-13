@@ -283,6 +283,22 @@ class TestQQOfficialImages:
 
         assert adapter.get_images(event) == []
 
+    def test_local_image_component_is_not_misclassified_as_url(self):
+        """AstrBot 临时文件路径只作为本地路径传递，不能触发远程 URL 下载。"""
+        from astrbot.api.message_components import Image
+
+        local_path = "/AstrBot/data/temp/media_image.jpg"
+        event = make_qq_official_event(
+            scene=QQ_OFFICIAL_SCENE_GROUP,
+            chain=[Image.fromURL(local_path)],
+        )
+
+        images = QQOfficialAdapter().get_images(event)
+
+        assert len(images) == 1
+        assert images[0].url is None
+        assert images[0].file_path == local_path
+
 
 class TestQQOfficialRole:
     """群角色提取（频道身份组映射，群场景恒 member）"""

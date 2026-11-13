@@ -247,7 +247,7 @@ async def compute_image_hash(
     url: Optional[str] = None,
     use_phash: bool = True,
 ) -> str:
-    """计算图片哈希（优先 pHash，降级为 URL hash）
+    """计算图片哈希（优先 pHash，其次 URL hash 或内容 SHA-256）
 
     Args:
         image_data: 图片二进制数据（可选）
@@ -264,5 +264,8 @@ async def compute_image_hash(
 
     if url:
         return compute_url_hash(url)
+
+    if image_data:
+        return hashlib.sha256(image_data).hexdigest()
 
     return ""

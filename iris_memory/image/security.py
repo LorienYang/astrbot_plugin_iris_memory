@@ -277,13 +277,27 @@ def is_path_within(path: Path, root: Path) -> bool:
         return False
 
 
-def local_image_to_data_url(
+def get_astrbot_temp_dir(plugin_data_dir: Path) -> Optional[Path]:
+    """从插件数据目录定位 AstrBot ``data/temp``，不信任消息提供的路径本身。"""
+    try:
+        plugin_data_path = plugin_data_dir.resolve()
+        for parent in plugin_data_path.parents:
+            if parent.name == "data":
+                temp_dir = parent / "temp"
+                if temp_dir.is_dir():
+                    return temp_dir
+    except OSError:
+        return None
+    return None
+
+
+def read_local_image_bytes(
     file_path: Path,
     *,
     allowed_root: Optional[Path] = None,
     max_bytes: int = MAX_IMAGE_BYTES,
-) -> Optional[str]:
-    """受限读取本地图片；可选要求真实路径位于指定根目录。"""
+) -> Optional[tuple[bytes, str]]:
+    """受限读取本地图片并验证大小与魔数。"""
     try:
         resolved = file_path.resolve(strict=True)
         if allowed_root is not None and not is_path_within(resolved, allowed_root):
@@ -303,8 +317,24 @@ def local_image_to_data_url(
         if mime is None:
             logger.warning(f"本地文件不是受支持的图片格式：{file_path.name}")
             return None
-        encoded = base64.b64encode(image_data).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
+        return image_data, mime
     except (OSError, ValueError) as e:
         logger.debug(f"读取本地图片失败：{e}")
         return None
+
+
+def local_image_to_data_url(
+    file_path: Path,
+    *,
+    allowed_root: Optional[Path] = None,
+    max_bytes: int = MAX_IMAGE_BYTES,
+) -> Optional[str]:
+    """受限读取本地图片；可选要求真实路径位于指定根目录。"""
+    image = read_local_image_bytes(
+        file_path, allowed_root=allowed_root, max_bytes=max_bytes
+    )
+    if image is None:
+        return None
+    image_data, mime = image
+    encoded = base64.b64encode(image_data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"

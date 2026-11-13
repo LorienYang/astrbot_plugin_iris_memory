@@ -16,7 +16,9 @@ from ..llm_modules import IMAGE_PARSING
 from .recorder_bridge import MessageRecorderBridge
 from .security import (
     fetch_safe_image_bytes,
+    get_astrbot_temp_dir,
     is_safe_remote_url,
+    is_path_within,
     local_image_to_data_url,
 )
 
@@ -92,14 +94,23 @@ class ImageParser:
 
             file_path = Path(image_info.file_path)
             if file_path.is_absolute():
-                # 平台消息中的绝对路径不可信，只允许读取本插件生成的图片缓存。
+                # 平台消息中的绝对路径不可信，仅授权插件缓存与 AstrBot 临时媒体目录。
                 from ..config import get_config
 
                 try:
-                    cache_root = get_config().data_dir / "image_cache"
-                    data_url = local_image_to_data_url(
-                        file_path, allowed_root=cache_root
-                    )
+                    data_dir = get_config().data_dir
+                    allowed_roots = [data_dir / "image_cache"]
+                    astrbot_temp_dir = get_astrbot_temp_dir(data_dir)
+                    if astrbot_temp_dir:
+                        allowed_roots.append(astrbot_temp_dir)
+                    data_url = None
+                    for root in allowed_roots:
+                        if is_path_within(file_path, root):
+                            data_url = local_image_to_data_url(
+                                file_path, allowed_root=root
+                            )
+                            if data_url:
+                                break
                 except RuntimeError:
                     data_url = None
                 if data_url:

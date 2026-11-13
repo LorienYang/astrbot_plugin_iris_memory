@@ -24,6 +24,7 @@ Iris Chat Memory - QQ 官方机器人平台适配器
 
 import asyncio
 from typing import Any, List, TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from astrbot.api.message_components import At, Image, Plain, Reply
 
@@ -391,16 +392,29 @@ class QQOfficialAdapter(PlatformAdapter):
     def _image_info_from_component(
         self, component: Any, source: str, message_id: str
     ) -> "ImageInfo | None":
-        """把链上 Image 组件转为 ImageInfo（url 缺失时返回 None）"""
+        """把链上 Image 组件转为 URL 或本地路径形式的 ImageInfo。"""
         from ..image.models import ImageInfo
 
-        url = str(getattr(component, "url", None) or getattr(component, "file", None) or "")
-        if not url:
+        image_source = str(
+            getattr(component, "url", None) or getattr(component, "file", None) or ""
+        )
+        if not image_source:
             return None
+
+        if image_source.startswith("//"):
+            url = f"https:{image_source}"
+            file_path = None
+        elif urlsplit(image_source).scheme.lower() in ("http", "https"):
+            url = image_source
+            file_path = None
+        else:
+            url = None
+            file_path = image_source
+
         return ImageInfo(
             url=url,
-            file_path=url,
-            format=self._detect_image_format(url),
+            file_path=file_path,
+            format=self._detect_image_format(image_source),
             size_kb=0,
             source=source,
             message_id=message_id,

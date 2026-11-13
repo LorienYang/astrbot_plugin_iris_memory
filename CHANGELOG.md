@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-11-13
+
+### Fixed
+
+- **QQ 官方 Bot 图片解析**：将 AstrBot `data/temp` 中的图片路径作为本地文件安全读取，避免误按远程 URL 校验或因路径不在插件缓存目录而拒绝解析；本地图片现可正常哈希、缓存并进入 all/related 解析流程。
+
 ## [3.3.0] - 2026-11-10
 
 ### ⚠️ 注意

@@ -795,24 +795,16 @@ def _build_all_mode_deps(pending_images, parse_results, *, with_cache=True):
 
 
 class TestParseImagesAllModeIndexAlignment:
-    """回归：all 模式图片解析结果下标与 images_to_parse 对齐
-
-    历史 bug：image_infos 按 has_url 过滤（更短），parse_batch 按它返回结果，
-    但回写用 parse_results[i] 索引未过滤的 images_to_parse[i]，存在仅 file_path
-    无 url 的图片时两列表错位，解析结果归属错误 img_item，缓存写入（以 image_hash
-    为键）与 mark_image_parsed 全部错位，被过滤项还永久残留 [IMG:...] 占位符。
-    """
+    """回归：URL 与本地图片混合时解析结果必须与图片队列项对齐。"""
 
     @pytest.mark.asyncio
-    async def test_mixed_url_and_no_url_alignment(self):
-        """仅 file_path 无 url 的图片在前，有 url 的在后：结果不得错位"""
-        # img_nourl: 仅 file_path，无 url —— 会被过滤出 image_infos
-        img_nourl = _make_image_item("hash_nourl", file_path="/tmp/a.jpg")
-        # img_url: 有 url —— 唯一可解析项
+    async def test_mixed_local_file_and_url_alignment(self):
+        """仅 file_path 的本地图片也可解析，且不会导致 URL 结果错位"""
+        img_local = _make_image_item("hash_local", file_path="/tmp/a.jpg")
         img_url = _make_image_item("hash_url", url="https://x.com/b.jpg")
 
-        # parse_batch 仅收到 img_url 的 info，返回一条成功结果
         parse_results = [
+            ParseResult(content="这是本地图片的描述", success=True),
             ParseResult(content="这是 URL 图片的描述", success=True),
         ]
 
@@ -823,7 +815,7 @@ class TestParseImagesAllModeIndexAlignment:
             l1_buffer,
             cache_manager,
             quota_manager,
-        ) = _build_all_mode_deps([img_nourl, img_url], parse_results)
+        ) = _build_all_mode_deps([img_local, img_url], parse_results)
 
         with (
             patch("astrbot_plugin_iris_memory.iris_memory.config.get_config", return_value=config),
@@ -837,26 +829,21 @@ class TestParseImagesAllModeIndexAlignment:
             MockParser.return_value.parse_batch = AsyncMock(return_value=parse_results)
             await _parse_images_if_enabled(MagicMock(), component_manager)
 
-        # 关键断言：img_url 的解析结果写入 img_url 的缓存，不是 img_nourl 的
-        cache_manager.set_cache.assert_awaited_once()
-        cache_entry = cache_manager.set_cache.call_args[0][0]
-        assert cache_entry.image_hash == "hash_url", (
-            "解析结果应归属有 URL 的图片，不得错位到无 URL 图片"
-        )
-        assert cache_entry.content == "这是 URL 图片的描述"
-
-        # img_nourl 被标记 FAILED 并清占位符（不留残留）
+        cache_entries = [call.args[0] for call in cache_manager.set_cache.call_args_list]
+        assert [(entry.image_hash, entry.content) for entry in cache_entries] == [
+            ("hash_local", "这是本地图片的描述"),
+            ("hash_url", "这是 URL 图片的描述"),
+        ]
         mark_calls = l1_buffer.mark_image_parsed.call_args_list
         marked = {c[0][1]: c[0][2] for c in mark_calls}
-        assert marked.get("hash_nourl") == ImageParseStatus.FAILED
+        assert marked.get("hash_local") == ImageParseStatus.SUCCESS
         assert marked.get("hash_url") == ImageParseStatus.SUCCESS
 
-        # img_nourl 的占位符被清空
         replace_calls = l1_buffer.replace_image_placeholder.call_args_list
         replaced = {c[0][1]: c[0][2] for c in replace_calls}
-        assert replaced.get("[IMG:hash_nourl]") == "", "无 URL 项占位符应清空"
+        assert replaced.get("[IMG:hash_local]") == "[图:这是本地图片的描述]"
         assert replaced.get("[IMG:hash_url]") == "[图:这是 URL 图片的描述]", (
-            "有 URL 项占位符应替换为解析结果"
+            "URL 项占位符应替换为解析结果"
         )
 
     @pytest.mark.asyncio
@@ -896,10 +883,10 @@ class TestParseImagesAllModeIndexAlignment:
         assert hashes == ["hash_1", "hash_2"], "全有 URL 时顺序应保持"
 
     @pytest.mark.asyncio
-    async def test_all_no_url_skips_parse_and_releases_quota(self):
-        """全部无 URL：不调 parse_batch，标记 FAILED，退还配额"""
-        img1 = _make_image_item("hash_1", file_path="/tmp/1.jpg")
-        img2 = _make_image_item("hash_2", file_path="/tmp/2.jpg")
+    async def test_all_without_source_skips_parse_and_releases_quota(self):
+        """全部没有 URL 或本地路径：不调 parse_batch，标记失败并退还配额"""
+        img1 = _make_image_item("hash_1")
+        img2 = _make_image_item("hash_2")
 
         (
             config,
@@ -1006,6 +993,73 @@ class TestQueueImagesPersonaId:
         )
         # 占位内容是图片占位符
         assert "[IMG:" in call_kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_astrbot_temp_image_is_read_and_queued(self, tmp_path):
+        """QQ 官方 Bot 的 data/temp 图片应读取本地内容并进入待解析队列。"""
+        import hashlib
+        from pathlib import Path
+
+        data_root = tmp_path / "data"
+        plugin_data_dir = data_root / "plugin_data" / "iris_memory"
+        plugin_data_dir.mkdir(parents=True)
+        temp_dir = data_root / "temp"
+        temp_dir.mkdir()
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"qq-official-image"
+        image_path = temp_dir / "media_image.jpg"
+        image_path.write_bytes(image_bytes)
+
+        config = MagicMock()
+        config.get = lambda key, default=None: {
+            "l1_buffer.image_parsing.enable": True,
+            "image_phash_enable": False,
+            "image_filter_enable": False,
+        }.get(key, default)
+        config.data_dir = plugin_data_dir
+
+        adapter = MagicMock()
+        adapter.get_images.return_value = [ImageInfo(file_path=str(image_path))]
+        adapter.get_session_id.return_value = "group_test"
+        adapter.get_user_id.return_value = "user_1"
+        adapter.get_raw_message.return_value = {"message_id": "mid_1"}
+        adapter.get_user_name.return_value = "测试用户"
+
+        l1_buffer = MagicMock()
+        l1_buffer.add_image = MagicMock()
+        l1_buffer.prepend_to_last_message.return_value = True
+        component_manager = MagicMock()
+        component_manager.get_available_component = lambda name: {
+            "l1_buffer": l1_buffer,
+            "image_cache": None,
+        }.get(name)
+
+        with (
+            patch(
+                "astrbot_plugin_iris_memory.iris_memory.config.get_config",
+                return_value=config,
+            ),
+            patch(
+                "astrbot_plugin_iris_memory.iris_memory.platform.get_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "astrbot_plugin_iris_memory.iris_memory.core.persona.resolve_persona",
+                new=AsyncMock(return_value="default"),
+            ),
+            patch(
+                "astrbot_plugin_iris_memory.iris_memory.image.security.fetch_safe_image_bytes",
+                new=AsyncMock(),
+            ) as fetch_remote,
+        ):
+            await _queue_images_to_l1_buffer(MagicMock(), component_manager)
+
+        fetch_remote.assert_not_awaited()
+        queued_item = l1_buffer.add_image.call_args.args[1]
+        assert queued_item.image_hash == hashlib.sha256(image_bytes).hexdigest()
+        assert queued_item.status == ImageParseStatus.PENDING
+        assert queued_item.image_info.file_path.startswith(
+            str(plugin_data_dir / "image_cache")
+        )
 
     @pytest.mark.asyncio
     async def test_prepend_success_no_add_message(self):

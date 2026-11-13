@@ -12,6 +12,7 @@ import inspect
 import time
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ..core import get_logger
@@ -631,8 +632,13 @@ async def _queue_images_to_l1_buffer(
     image_suffixes: list[str] = []
     queued_count = 0
 
-    from ..image.security import fetch_safe_image_bytes
+    from ..image.security import (
+        fetch_safe_image_bytes,
+        get_astrbot_temp_dir,
+        read_local_image_bytes,
+    )
 
+    astrbot_temp_dir = get_astrbot_temp_dir(config.data_dir)
     for image_info in images:
         # ---- 提前下载图片数据（用于 pHash、过滤、本地缓存） ----
         image_data: bytes | None = None
@@ -643,8 +649,14 @@ async def _queue_images_to_l1_buffer(
                     image_data, _ = downloaded
             except Exception as e:
                 logger.debug(f"图片下载失败：{e}")
+        elif image_info.file_path and astrbot_temp_dir:
+            local_image = read_local_image_bytes(
+                Path(image_info.file_path), allowed_root=astrbot_temp_dir
+            )
+            if local_image:
+                image_data, _ = local_image
 
-        # ---- 哈希计算（有数据时走 pHash，否则走 URL MD5） ----
+        # ---- 哈希计算（有数据时走 pHash/SHA-256，否则走 URL MD5） ----
         image_hash = await compute_image_hash(
             image_data=image_data,
             url=image_info.url,
@@ -867,24 +879,23 @@ async def _parse_images_if_enabled(
     logger.info(f"开始解析 {len(images_to_parse)} 张图片（all 模式）")
 
     # 用 (img_item, image_info) 配对，避免过滤后列表与 images_to_parse 下标错位。
-    # 历史 bug：image_infos 按 has_url 过滤（更短），parse_batch 按它返回结果，
-    # 但回写用 parse_results[i] 索引未过滤的 images_to_parse[i]，存在仅 file_path
-    # 无 url 的图片时两列表错位，解析结果归属错误 img_item，缓存写入（以 image_hash
-    # 为键）与 mark_image_parsed 全部错位，被过滤项还永久残留 [IMG:...] 占位符。
     parse_pairs = [
         (img, img.image_info)
         for img in images_to_parse
-        if img.image_info and img.image_info.has_url
+        if img.image_info and (img.image_info.has_url or img.image_info.has_file_path)
     ]
 
-    # 无 url 的图片无法解析，单独标记 FAILED 并清占位符，不留残留
-    no_url_items = [
+    # 无 URL 且无本地文件的图片无法解析，单独标记 FAILED 并清占位符。
+    no_source_items = [
         img
         for img in images_to_parse
-        if not (img.image_info and img.image_info.has_url)
+        if not (
+            img.image_info
+            and (img.image_info.has_url or img.image_info.has_file_path)
+        )
     ]
-    for img_item in no_url_items:
-        logger.debug(f"图片无 URL，跳过解析：{img_item.image_hash[:8]}")
+    for img_item in no_source_items:
+        logger.debug(f"图片无可用来源，跳过解析：{img_item.image_hash[:8]}")
         l1_buffer.mark_image_parsed(
             session_id, img_item.image_hash, ImageParseStatus.FAILED, claim_token
         )
@@ -892,9 +903,9 @@ async def _parse_images_if_enabled(
         l1_buffer.replace_image_placeholder(session_id, placeholder, "")
 
     if not parse_pairs:
-        # 全部无 url，退还预扣配额
-        if quota_manager and quota_manager.is_available and no_url_items:
-            await quota_manager.release_quota(len(no_url_items))
+        # 全部没有可用来源，退还预扣配额
+        if quota_manager and quota_manager.is_available and no_source_items:
+            await quota_manager.release_quota(len(no_source_items))
         return
 
     image_infos = [info for _img, info in parse_pairs]
@@ -958,11 +969,11 @@ async def _parse_images_if_enabled(
 
     # 退还解析失败的预扣配额，避免静默耗尽
     if quota_manager and quota_manager.is_available:
-        failed_count = (len(parse_pairs) - success_count) + len(no_url_items)
+        failed_count = (len(parse_pairs) - success_count) + len(no_source_items)
         if failed_count > 0:
             await quota_manager.release_quota(failed_count)
 
     logger.info(
         f"已解析 {success_count}/{len(images_to_parse)} 张图片"
-        f"（无 URL 跳过 {len(no_url_items)} 张）"
+        f"（无可用来源跳过 {len(no_source_items)} 张）"
     )

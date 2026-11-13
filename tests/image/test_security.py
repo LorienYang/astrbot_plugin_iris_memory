@@ -12,6 +12,7 @@ from astrbot_plugin_iris_memory.iris_memory.image import ImageInfo, ImageParser
 from astrbot_plugin_iris_memory.iris_memory.image.security import (
     _resolve_and_pin,
     fetch_safe_image_bytes,
+    get_astrbot_temp_dir,
     local_image_to_data_url,
 )
 from astrbot_plugin_iris_memory.iris_memory.l1_buffer.buffer import L1Buffer
@@ -253,6 +254,29 @@ async def test_parser_rejects_untrusted_absolute_file_path(tmp_path: Path):
         result = await parser._resolve_image_url(ImageInfo(file_path=str(outside)))
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_parser_accepts_image_from_astrbot_temp_dir(tmp_path: Path):
+    """AstrBot data/temp 中的平台临时图片可读，且不放宽到任意绝对路径。"""
+    data_root = tmp_path / "AstrBot" / "data"
+    plugin_data_dir = data_root / "plugin_data" / "iris_memory"
+    plugin_data_dir.mkdir(parents=True)
+    temp_dir = data_root / "temp"
+    temp_dir.mkdir()
+    image_path = temp_dir / "media_image.jpg"
+    image_path.write_bytes(PNG_BYTES)
+    parser = ImageParser(Mock())
+
+    with patch(
+        "astrbot_plugin_iris_memory.iris_memory.config.get_config",
+        return_value=SimpleNamespace(data_dir=plugin_data_dir),
+    ):
+        result = await parser._resolve_image_url(ImageInfo(file_path=str(image_path)))
+
+    assert get_astrbot_temp_dir(plugin_data_dir) == temp_dir
+    assert result is not None
+    assert result.startswith("data:image/png;base64,")
 
 
 def test_cleanup_only_deletes_files_inside_configured_cache(tmp_path: Path):
